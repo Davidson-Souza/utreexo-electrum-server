@@ -31,7 +31,7 @@
 #![deny(non_camel_case_types)]
 #![deny(non_snake_case)]
 #![deny(non_upper_case_globals)]
-#![deny(unused)]
+//#![deny(unused)]
 
 mod address_cache;
 mod blockchain;
@@ -57,7 +57,11 @@ use miniscript::{Descriptor, DescriptorPublicKey};
 use pretty_env_logger::env_logger::TimestampPrecision;
 use std::str::FromStr;
 
+#[cfg(not(feature = "experimental-p2p"))]
 use crate::blockchain::cli_blockchain::UtreexodBackend;
+
+#[cfg(feature = "experimental-p2p")]
+use crate::blockchain::p2p_blockchain::{Mempool, UtreexoNode};
 
 fn main() {
     // Setup global logger
@@ -92,6 +96,7 @@ fn main() {
                 }),
                 "wallet".into(),
             );
+
             debug!("Loading wallet");
             let mut wallet = load_wallet(&data_dir);
             wallet.setup().expect("Could not initialize wallet");
@@ -105,6 +110,7 @@ fn main() {
                 log::error!("Something went wrong while setting wallet up: {e}");
                 return;
             }
+            #[cfg(not(feature = "experimental-p2p"))]
             let rpc = create_rpc_connection(
                 &get_one_or_another(rpc_host, data.rpc.rpc_host, "localhost".into()),
                 get_one_or_another(rpc_port, data.rpc.rpc_port, 8332),
@@ -116,6 +122,7 @@ fn main() {
                 )),
             );
 
+            #[cfg(not(feature = "experimental-p2p"))]
             if !test_rpc(&rpc) {
                 info!("Unable to connect with rpc");
                 return;
@@ -126,6 +133,8 @@ fn main() {
             let blockchain_state = Arc::new(load_chain_state(&data_dir, get_net(&params.network)));
 
             debug!("Done loading wallet");
+
+            #[cfg(not(feature = "experimental-p2p"))]
             let chain_provider = UtreexodBackend {
                 chainstate: blockchain_state.clone(),
                 rpc,
@@ -137,6 +146,12 @@ fn main() {
                 use_external_sync,
                 term: shutdown,
             };
+            #[cfg(feature = "experimental-p2p")]
+            let chain_provider = UtreexoNode::new(
+                blockchain_state.clone(),
+                Arc::new(async_std::sync::RwLock::new(Mempool)),
+                Network::Signet,
+            );
             info!("Starting server");
             // Create a new electrum server, we need to block_on because `ElectrumServer::new` is `async`
             // but our main isn't, so we can't `.await` on it.

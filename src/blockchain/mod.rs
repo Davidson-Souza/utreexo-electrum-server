@@ -4,6 +4,8 @@ pub mod chainstore;
 pub mod cli_blockchain;
 pub mod error;
 pub mod udata;
+#[cfg(feature = "experimental-p2p")]
+pub mod p2p_blockchain;
 
 use std::collections::HashMap;
 
