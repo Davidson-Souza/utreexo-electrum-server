@@ -8,6 +8,7 @@ use async_std::{
     task::{sleep, spawn},
 };
 use bitcoin::{BlockHash, Network};
+use btcd_rpc::client::{BTCDClient, BTCDConfigs};
 use std::{
     collections::HashMap,
     net::{SocketAddr, SocketAddrV4},
@@ -48,6 +49,7 @@ pub struct UtreexoNode {
     mempool: Arc<RwLock<Mempool>>,
     node_rx: Receiver<NodeNotification>,
     node_tx: Sender<NodeNotification>,
+    rpc: Arc<BTCDClient>,
 }
 
 impl UtreexoNode {
@@ -55,6 +57,7 @@ impl UtreexoNode {
         chain: Arc<ChainState<KvChainStore>>,
         mempool: Arc<RwLock<Mempool>>,
         network: Network,
+        rpc: Arc<BTCDClient>,
     ) -> Self {
         let (node_tx, node_rx) = channel::bounded(1024);
         UtreexoNode {
@@ -65,6 +68,7 @@ impl UtreexoNode {
             node_tx,
             peer_id_count: 0,
             peers: HashMap::new(),
+            rpc,
         }
     }
     pub async fn run(mut self) {
@@ -82,6 +86,7 @@ impl UtreexoNode {
             self.mempool.clone(),
             self.network,
             self.node_tx.clone(),
+            self.rpc.clone(),
         )
         .await;
 

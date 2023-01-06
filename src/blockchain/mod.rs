@@ -1,6 +1,7 @@
 pub mod chain_state;
 mod chainparams;
 pub mod chainstore;
+#[cfg(not(feature = "experimental-p2p"))]
 pub mod cli_blockchain;
 pub mod error;
 pub mod udata;

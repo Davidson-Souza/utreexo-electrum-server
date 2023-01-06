@@ -31,7 +31,7 @@
 #![deny(non_camel_case_types)]
 #![deny(non_snake_case)]
 #![deny(non_upper_case_globals)]
-//#![deny(unused)]
+#![deny(unused)]
 
 mod address_cache;
 mod blockchain;
@@ -48,7 +48,7 @@ use async_std::task::{self, block_on};
 
 use bitcoin::Network;
 use blockchain::{chain_state::ChainState, chainstore::KvChainStore};
-use btcd_rpc::client::{BTCDClient, BTCDConfigs, BtcdRpc};
+use btcd_rpc::client::{BTCDClient, BTCDConfigs};
 use clap::Parser;
 use cli::{Cli, Commands};
 use config_file::ConfigFile;
@@ -74,6 +74,7 @@ fn main() {
     let params = Cli::parse();
     let data = get_config_file(&params);
     match params.command {
+        #[cfg(not(feature = "experimental-p2p"))]
         Commands::Run {
             data_dir,
             rpc_user,
@@ -110,7 +111,6 @@ fn main() {
                 log::error!("Something went wrong while setting wallet up: {e}");
                 return;
             }
-            #[cfg(not(feature = "experimental-p2p"))]
             let rpc = create_rpc_connection(
                 &get_one_or_another(rpc_host, data.rpc.rpc_host, "localhost".into()),
                 get_one_or_another(rpc_port, data.rpc.rpc_port, 8332),
@@ -134,7 +134,6 @@ fn main() {
 
             debug!("Done loading wallet");
 
-            #[cfg(not(feature = "experimental-p2p"))]
             let chain_provider = UtreexodBackend {
                 chainstate: blockchain_state.clone(),
                 rpc,
@@ -146,11 +145,82 @@ fn main() {
                 use_external_sync,
                 term: shutdown,
             };
-            #[cfg(feature = "experimental-p2p")]
+            info!("Starting server");
+            // Create a new electrum server, we need to block_on because `ElectrumServer::new` is `async`
+            // but our main isn't, so we can't `.await` on it.
+            let electrum_server = block_on(electrum::electrum_protocol::ElectrumServer::new(
+                "0.0.0.0:50001",
+                wallet,
+                blockchain_state,
+            ))
+            .unwrap();
+
+            task::spawn(electrum::electrum_protocol::accept_loop(
+                electrum_server.listener.clone().unwrap(),
+                electrum_server.notify_tx.clone(),
+            ));
+            task::spawn(chain_provider.run());
+            info!("Server running on: 0.0.0.0:50001");
+            task::block_on(electrum_server.main_loop()).expect("Main loop failed");
+        }
+        #[cfg(feature = "experimental-p2p")]
+        Commands::Run {
+            data_dir,
+            rpc_user,
+            rpc_password,
+            rpc_host,
+            rpc_port,
+            wallet_xpub,
+        } => {
+            let data_dir = get_one_or_another(
+                data_dir,
+                dirs::home_dir().map(|x: PathBuf| {
+                    x.to_str().unwrap_or_default().to_owned() + "/.utreexo_wallet/"
+                }),
+                "wallet".into(),
+            );
+
+            debug!("Loading wallet");
+            let mut wallet = load_wallet(&data_dir);
+            wallet.setup().expect("Could not initialize wallet");
+            debug!("Done loading wallet");
+            let result = setup_wallet(
+                get_both_vec(wallet_xpub, data.wallet.xpubs),
+                &mut wallet,
+                params.network.clone(),
+            );
+            if let Err(e) = result {
+                log::error!("Something went wrong while setting wallet up: {e}");
+                return;
+            }
+            let rpc = create_rpc_connection(
+                &get_one_or_another(rpc_host, data.rpc.rpc_host, "localhost".into()),
+                get_one_or_another(rpc_port, data.rpc.rpc_port, 8332),
+                Some(get_one_or_another(rpc_user, data.rpc.rpc_user, "".into())),
+                Some(get_one_or_another(
+                    rpc_password,
+                    data.rpc.rpc_password,
+                    "".into(),
+                )),
+            );
+
+            #[cfg(not(feature = "experimental-p2p"))]
+            if !test_rpc(&rpc) {
+                info!("Unable to connect with rpc");
+                return;
+            }
+            info!("Starting sync worker, this might take a while!");
+
+            debug!("Loading database...");
+            let blockchain_state = Arc::new(load_chain_state(&data_dir, get_net(&params.network)));
+
+            debug!("Done loading wallet");
+
             let chain_provider = UtreexoNode::new(
                 blockchain_state.clone(),
                 Arc::new(async_std::sync::RwLock::new(Mempool)),
                 Network::Signet,
+                rpc,
             );
             info!("Starting server");
             // Create a new electrum server, we need to block_on because `ElectrumServer::new` is `async`
@@ -292,6 +362,7 @@ fn derive_addresses<D: AddressCacheDatabase>(
         wallet.cache_address(address.script_pubkey());
     }
 }
+#[cfg(not(feature = "experimental-p2p"))]
 /// Finds out whether our RPC works or not
 fn test_rpc(rpc: &BTCDClient) -> bool {
     if rpc.getbestblock().is_ok() {

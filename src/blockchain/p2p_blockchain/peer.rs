@@ -3,7 +3,8 @@ use self::peer_utils::make_pong;
 
 use super::{stream_reader::StreamReader, Mempool, NodeNotification};
 use crate::blockchain::{
-    chain_state::ChainState, chainstore::KvChainStore, BlockchainProviderInterface,
+    chain_state::ChainState, chainstore::KvChainStore, error::BlockchainError, udata::LeafData,
+    BlockchainInterface, BlockchainProviderInterface,
 };
 use async_std::{
     channel::{Receiver, Sender},
@@ -14,15 +15,21 @@ use async_std::{
 };
 use bitcoin::{
     consensus::{deserialize, deserialize_partial, serialize, Decodable},
+    hashes::{hex::FromHex, sha256},
     network::{
         constants::ServiceFlags,
         message::{NetworkMessage, RawNetworkMessage, MAX_MSG_SIZE},
         message_network::VersionMessage,
     },
-    Network,
+    Network, OutPoint,
+};
+use btcd_rpc::{
+    client::{BTCDClient, BtcdRpc},
+    json_types::blockchain::GetUtreexoProofResult,
 };
 use clap::builder::TypedValueParser;
-use std::io::BufReader;
+use rustreexo::accumulator::proof::Proof;
+use std::{collections::HashMap, io::BufReader};
 use std::{sync::Arc, time::Instant};
 #[derive(PartialEq)]
 enum State {
@@ -46,9 +53,47 @@ pub struct Peer {
     node_tx: Sender<NodeNotification>,
     state: State,
     send_headers: bool,
+    rpc: Arc<BTCDClient>, // For proofs
 }
 impl Peer {
-    pub async fn read_loop(mut self) {
+    pub fn get_proof<T: BtcdRpc>(
+        rpc: &T,
+        hash: &String,
+    ) -> Result<(Proof, Vec<sha256::Hash>, Vec<LeafData>), BlockchainError> {
+        let proof = rpc.getutreexoproof(hash.to_string(), true)?.get_verbose();
+        Self::process_proof(proof)
+    }
+    fn process_proof(
+        proof: GetUtreexoProofResult,
+    ) -> Result<(Proof, Vec<sha256::Hash>, Vec<LeafData>), BlockchainError> {
+        let preimages: Vec<_> = proof
+            .target_preimages
+            .iter()
+            .map(|preimage| {
+                deserialize_partial::<LeafData>(&Vec::from_hex(preimage).unwrap())
+                    .unwrap()
+                    .0
+            })
+            .collect();
+
+        let proof_hashes: Vec<_> = proof
+            .proofhashes
+            .iter()
+            .map(|hash| sha256::Hash::from_hex(hash).unwrap())
+            .collect();
+        let targets = proof.prooftargets;
+
+        let targethashes: Vec<_> = proof
+            .targethashes
+            .iter()
+            .map(|hash| sha256::Hash::from_hex(hash).unwrap())
+            .collect();
+        let proof = Proof::new(targets, proof_hashes);
+
+        Ok((proof, targethashes, preimages))
+    }
+
+    pub async fn read_loop(mut self) -> Result<(), BlockchainError> {
         let read_stream = self.stream.clone();
         let mut buff = vec![0_u8; MAX_MSG_SIZE];
         let mut stream: StreamReader<_, RawNetworkMessage> = StreamReader::new(read_stream);
@@ -57,7 +102,7 @@ impl Peer {
             if self.state != State::Connected
                 && !(message.payload.cmd() == "version" || message.payload.cmd() != "verack")
             {
-                return;
+                return Ok(());
             }
             match message.payload {
                 bitcoin::network::message::NetworkMessage::Version(version) => {
@@ -99,7 +144,28 @@ impl Peer {
                 bitcoin::network::message::NetworkMessage::Tx(_) => {
                     // self.mempool.write().await.accept_to_mempool();
                 }
-                bitcoin::network::message::NetworkMessage::Block(_) => {}
+                bitcoin::network::message::NetworkMessage::Block(block) => {
+                    let (proof, del_hashes, leaf_data) =
+                        Self::get_proof(&*self.rpc, &block.block_hash().to_string())?;
+                    let height = self.chain.get_height()? + 1;
+                    let mut inputs = HashMap::new();
+                    for tx in block.txdata.iter() {
+                        for (vout, out) in tx.output.iter().enumerate() {
+                            inputs.insert(
+                                OutPoint {
+                                    txid: tx.txid(),
+                                    vout: vout as u32,
+                                },
+                                out.clone(),
+                            );
+                        }
+                    }
+                    for leaf in leaf_data {
+                        inputs.insert(leaf.prevout, leaf.utxo);
+                    }
+                    self.chain
+                        .connect_block(&block, proof, inputs, del_hashes, height);
+                }
                 bitcoin::network::message::NetworkMessage::Headers(_) => todo!(),
                 bitcoin::network::message::NetworkMessage::SendHeaders => {
                     self.send_headers = true;
@@ -132,6 +198,7 @@ impl Peer {
                 bitcoin::network::message::NetworkMessage::Unknown { command, payload } => todo!(),
             }
         }
+        Ok(())
     }
 }
 impl Peer {
@@ -152,6 +219,7 @@ impl Peer {
         mempool: Arc<RwLock<Mempool>>,
         network: Network,
         node_tx: Sender<NodeNotification>,
+        rpc: Arc<BTCDClient>,
     ) -> Result<Peer, std::io::Error> {
         let stream = TcpStream::connect(address).await?;
 
@@ -169,6 +237,7 @@ impl Peer {
             user_agent: "".into(),
             state: State::None,
             send_headers: false,
+            rpc,
         };
         let version = peer_utils::build_version_message();
         // send a version

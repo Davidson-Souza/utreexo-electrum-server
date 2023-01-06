@@ -41,6 +41,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[cfg(not(feature = "experimental-p2p"))]
     /// Starts your wallet and server
     Run {
         /// Where should we store data
@@ -67,5 +68,26 @@ pub enum Commands {
         /// If use_external_sync is set, this option provides which server we use
         #[arg(long)]
         external_sync: Option<String>,
+    },
+    #[cfg(feature = "experimental-p2p")]
+    /// Starts your wallet and server
+    Run {
+        /// Where should we store data
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Add a xpub to our wallet
+        #[arg(long)]
+        wallet_xpub: Option<Vec<String>>,
+        /// Your rpc user, as set in Utreexod
+        #[arg(long)]
+        rpc_user: Option<String>,
+        /// Your rpc password, as set in Utreexod
+        #[arg(long)]
+        rpc_password: Option<String>,
+        /// The hostname:port of Utreexod
+        #[arg(short, long)]
+        rpc_host: Option<String>,
+        #[arg(long)]
+        rpc_port: Option<u32>,
     },
 }
