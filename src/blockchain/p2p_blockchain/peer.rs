@@ -1,7 +1,7 @@
 #![allow(unused)]
 use self::peer_utils::make_pong;
 
-use super::{stream_reader::StreamReader, Mempool, NodeNotification};
+use super::{stream_reader::StreamReader, Mempool, NodeNotification, NodeRequest};
 use crate::blockchain::{
     chain_state::ChainState, chainstore::KvChainStore, error::BlockchainError, udata::LeafData,
     BlockchainInterface, BlockchainProviderInterface,
@@ -53,6 +53,7 @@ pub struct Peer {
     node_tx: Sender<NodeNotification>,
     state: State,
     send_headers: bool,
+    node_requests: Receiver<NodeRequest>,
     rpc: Arc<BTCDClient>, // For proofs
 }
 impl Peer {
@@ -163,8 +164,7 @@ impl Peer {
                     for leaf in leaf_data {
                         inputs.insert(leaf.prevout, leaf.utxo);
                     }
-                    self.chain
-                        .connect_block(&block, proof, inputs, del_hashes, height);
+                    self.chain.connect_block(&block, proof, inputs, del_hashes);
                 }
                 bitcoin::network::message::NetworkMessage::Headers(_) => todo!(),
                 bitcoin::network::message::NetworkMessage::SendHeaders => {
@@ -220,6 +220,7 @@ impl Peer {
         network: Network,
         node_tx: Sender<NodeNotification>,
         rpc: Arc<BTCDClient>,
+        node_requests: Receiver<NodeRequest>,
     ) -> Result<Peer, std::io::Error> {
         let stream = TcpStream::connect(address).await?;
 
@@ -238,6 +239,7 @@ impl Peer {
             state: State::None,
             send_headers: false,
             rpc,
+            node_requests,
         };
         let version = peer_utils::build_version_message();
         // send a version

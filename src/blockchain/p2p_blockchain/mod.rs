@@ -3,7 +3,7 @@
 use self::peer::Peer;
 use super::{chain_state::ChainState, chainstore::KvChainStore};
 use async_std::{
-    channel::{self, Receiver, Sender},
+    channel::{self, bounded, Receiver, Sender},
     sync::RwLock,
     task::{sleep, spawn},
 };
@@ -36,6 +36,11 @@ pub enum NodeNotification {
     /// a compact blocs communication, not a explicit block request
     NewCompactBlock(BlockHash),
 }
+/// Sent from node to peers, usually to request something
+pub enum NodeRequest {
+    /// Get this block's data
+    GetBlock(BlockHash),
+}
 pub struct Mempool;
 impl Mempool {
     pub fn accept_to_mempool(&self) {}
@@ -44,7 +49,7 @@ impl Mempool {
 pub struct UtreexoNode {
     peer_id_count: u32,
     network: Network,
-    peers: HashMap<u32, Arc<RwLock<Peer>>>,
+    peers: HashMap<u32, Sender<NodeRequest>>,
     chain: Arc<ChainState<KvChainStore>>,
     mempool: Arc<RwLock<Mempool>>,
     node_rx: Receiver<NodeNotification>,
@@ -79,6 +84,7 @@ impl UtreexoNode {
         }
     }
     async fn create_connection(&mut self, peer: &str) {
+        let (requests_tx, requests_rx) = bounded(1024);
         let peer = Peer::create_outbound_connection(
             self.chain.clone(),
             self.peer_id_count,
@@ -87,6 +93,7 @@ impl UtreexoNode {
             self.network,
             self.node_tx.clone(),
             self.rpc.clone(),
+            requests_rx,
         )
         .await;
 
